@@ -70,8 +70,7 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
         _meteringEnabled = meteringEnabled
 
         if (mediaRecorder != null) {
-            promise.reject("InvalidState", "startRecorder has already been called.")
-            return
+            mediaRecorder = null
         }
 
         var newMediaRecorder: MediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
