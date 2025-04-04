@@ -100,7 +100,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
 
         DispatchQueue.main.async {
             if (self.audioRecorder == nil) {
-                return reject("RNAudioPlayerRecorder", "Recorder is not recording", nil)
+                return reject("RNAudioRecorderError", "Cannot pause recorder: recorder instance is nil", nil)
             }
 
             self.audioRecorder.pause()
@@ -115,7 +115,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
     ) -> Void {
         DispatchQueue.main.async {
             if (self.audioRecorder == nil) {
-                return reject("RNAudioPlayerRecorder", "Recorder is nil", nil)
+                return reject("RNAudioRecorderError", "Cannot resume recorder: recorder instance is nil", nil)
             }
 
             self.audioRecorder.record()
@@ -123,7 +123,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
             if (self.recordTimer == nil) {
                 self.startRecorderTimer()
             }
-            resolve("Recorder paused!")
+            resolve("Recorder resumed!")
         }
     }
 
@@ -193,9 +193,15 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         if (sampleRate == nil) {
             sampleRate = 44100;
         }
+        
+        // Using standard sample rates that are well-supported
+        if (sampleRate != 8000 && sampleRate != 16000 && sampleRate != 22050 && sampleRate != 44100 && sampleRate != 48000) {
+            sampleRate = 44100; // Default to a safe value
+            print("RNARP: Non-standard sample rate provided, defaulting to 44100Hz")
+        }
 
         guard let avFormat: AudioFormatID = avFormat(fromString: encoding) else {
-            return reject("RNAudioPlayerRecorder", "Audio format not available", nil)
+            return reject("RNAudioRecorderError", "Audio format '\(encoding ?? "nil")' not available or not supported", nil)
         }
 
         if (path == "DEFAULT") {
@@ -255,6 +261,22 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
             ] as [String : Any]
 
             do {
+                // Make sure we clean up any previous recorder instance
+                if (self.audioRecorder != nil) {
+                    self.audioRecorder = nil
+                }
+                
+                // Make sure the directory exists
+                let directory = audioFileURL!.deletingLastPathComponent()
+                if !FileManager.default.fileExists(atPath: directory.path) {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                }
+                
+                // Check if file exists and remove it
+                if FileManager.default.fileExists(atPath: audioFileURL!.path) {
+                    try FileManager.default.removeItem(at: audioFileURL!)
+                }
+                
                 audioRecorder = try AVAudioRecorder(url: audioFileURL!, settings: settings)
 
                 if (audioRecorder != nil) {
@@ -264,7 +286,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
                     let isRecordStarted = audioRecorder.record()
 
                     if !isRecordStarted {
-                        reject("RNAudioPlayerRecorder", "Error occured during initiating recorder", nil)
+                        reject("RNAudioRecorderError", "Error starting recorder: AVAudioRecorder.record() returned false", nil)
                         return
                     }
 
@@ -274,9 +296,9 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
                     return
                 }
 
-                reject("RNAudioPlayerRecorder", "Error occured during initiating recorder", nil)
+                reject("RNAudioRecorderError", "Error initializing recorder: AVAudioRecorder is nil after initialization", nil)
             } catch {
-                reject("RNAudioPlayerRecorder", "Error occured during recording", nil)
+                reject("RNAudioRecorderError", "Exception during recorder initialization: \(error.localizedDescription)", error as NSError)
             }
         }
 
@@ -291,12 +313,12 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
                     if granted {
                         startRecording()
                     } else {
-                        reject("RNAudioPlayerRecorder", "Record permission not granted", nil)
+                        reject("RNAudioRecorderPermissionError", "Microphone permission denied by user", nil)
                     }
                 }
             }
         } catch {
-            reject("RNAudioPlayerRecorder", "Failed to record", nil)
+            reject("RNAudioRecorderSessionError", "Failed to configure audio session: \(error.localizedDescription)", error as NSError)
         }
     }
 
@@ -312,11 +334,12 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
 
         DispatchQueue.main.async {
             if (self.audioRecorder == nil) {
-                reject("RNAudioPlayerRecorder", "Failed to stop recorder. It is already nil.", nil)
+                resolve("Recorder is already stopped")
                 return
             }
 
             self.audioRecorder.stop()
+            self.audioRecorder = nil
 
             resolve(self.audioFileURL?.absoluteString)
         }
@@ -367,23 +390,41 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
             try audioSession.setCategory(.playAndRecord, mode: .default, options: [AVAudioSession.CategoryOptions.defaultToSpeaker, AVAudioSession.CategoryOptions.allowBluetooth])
             try audioSession.setActive(true)
         } catch {
-            reject("RNAudioPlayerRecorder", "Failed to play", nil)
+            reject("RNAudioPlayerSessionError", "Failed to configure audio session for playback: \(error.localizedDescription)", error as NSError)
+            return
         }
 
-        setAudioFileURL(path: path)
-        audioPlayerAsset = AVURLAsset(url: audioFileURL!, options:["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
-        audioPlayerItem = AVPlayerItem(asset: audioPlayerAsset!)
+        do {
+            setAudioFileURL(path: path)
+            
+            // Validate that the URL is valid
+            guard let fileURL = audioFileURL else {
+                reject("RNAudioPlayerPathError", "Invalid audio file path provided: \(path)", nil)
+                return
+            }
+            
+            // Check if the file exists for local files
+            if fileURL.isFileURL && !FileManager.default.fileExists(atPath: fileURL.path) {
+                reject("RNAudioPlayerFileError", "Audio file does not exist at path: \(fileURL.path)", nil)
+                return
+            }
+            
+            audioPlayerAsset = AVURLAsset(url: fileURL, options:["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
+            audioPlayerItem = AVPlayerItem(asset: audioPlayerAsset!)
 
-        if (audioPlayer == nil) {
-            audioPlayer = AVPlayer(playerItem: audioPlayerItem)
-        } else {
-            audioPlayer.replaceCurrentItem(with: audioPlayerItem)
+            if (audioPlayer == nil) {
+                audioPlayer = AVPlayer(playerItem: audioPlayerItem)
+            } else {
+                audioPlayer.replaceCurrentItem(with: audioPlayerItem)
+            }
+
+            addPeriodicTimeObserver()
+            NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying), name: Notification.Name.AVPlayerItemDidPlayToEndTime, object: audioPlayer.currentItem)
+            audioPlayer.play()
+            resolve(audioFileURL?.absoluteString)
+        } catch {
+            reject("RNAudioPlayerError", "Failed to initialize player: \(error.localizedDescription)", error as NSError)
         }
-
-        addPeriodicTimeObserver()
-        NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying), name: Notification.Name.AVPlayerItemDidPlayToEndTime, object: audioPlayer.currentItem)
-        audioPlayer.play()
-        resolve(audioFileURL?.absoluteString)
     }
     
     @objc
@@ -405,7 +446,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
         if (audioPlayer == nil) {
-            return reject("RNAudioPlayerRecorder", "Player has already stopped.", nil)
+            return reject("RNAudioPlayerError", "Cannot stop player: player instance is nil", nil)
         }
 
         audioPlayer.pause()
@@ -421,7 +462,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
         if (audioPlayer == nil) {
-            return reject("RNAudioPlayerRecorder", "Player is not playing", nil)
+            return reject("RNAudioPlayerError", "Cannot pause player: player instance is nil", nil)
         }
 
         audioPlayer.pause()
@@ -434,7 +475,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
         if (audioPlayer == nil) {
-            return reject("RNAudioPlayerRecorder", "Player is null", nil)
+            return reject("RNAudioPlayerError", "Cannot resume player: player instance is nil", nil)
         }
 
         audioPlayer.play()
@@ -448,11 +489,11 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
         if (audioPlayer == nil) {
-            return reject("RNAudioPlayerRecorder", "Player is null", nil)
+            return reject("RNAudioPlayerError", "Cannot seek: player instance is nil", nil)
         }
 
         audioPlayer.seek(to: CMTime(seconds: time / 1000, preferredTimescale: CMTimeScale(NSEC_PER_SEC)))
-        resolve("Resumed!")
+        resolve("Seeked successfully!")
     }
 
     @objc(setVolume:resolve:rejecter:)
@@ -472,11 +513,11 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
         if (audioPlayer == nil) {
-            return reject("RNAudioPlayerRecorder", "Player is null", nil)
+            return reject("RNAudioPlayerError", "Cannot set playback speed: player instance is nil", nil)
         }
 
         audioPlayer.rate = playbackSpeed
-        resolve("setPlaybackSpeed")
+        resolve("Playback speed set to \(playbackSpeed)")
     }
 
     private func avFormat(fromString encoding: String?) -> AudioFormatID? {
