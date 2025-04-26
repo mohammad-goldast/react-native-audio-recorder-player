@@ -285,11 +285,6 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
                     audioRecorder.isMeteringEnabled = _meteringEnabled
                     let isRecordStarted = audioRecorder.record()
 
-                    if !isRecordStarted {
-                        reject("RNAudioRecorderError", "Error starting recorder: AVAudioRecorder.record() returned false", nil)
-                        return
-                    }
-
                     startRecorderTimer()
 
                     resolve(audioFileURL?.absoluteString)
